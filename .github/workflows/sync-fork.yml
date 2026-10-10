@@ -1,0 +1,36 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/msitarzewski/agency-agents.git || true
+
+      - name: Sync default branch with upstream
+        run: |
+          BASE_BRANCH=$(git remote show upstream | sed -n 's/.*HEAD branch: //p')
+          echo "Default branch: $BASE_BRANCH"
+          git fetch upstream
+          git checkout "$BASE_BRANCH"
+          git merge --ff-only "upstream/$BASE_BRANCH"
+          git push origin "$BASE_BRANCH"
