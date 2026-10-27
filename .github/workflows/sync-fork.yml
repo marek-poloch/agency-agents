@@ -4,33 +4,95 @@ on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sync-fork.yml
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    timeout-minutes: 10
     steps:
-      - name: Checkout fork
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
         with:
+          ref: main
           fetch-depth: 0
 
-      - name: Configure git
+      - name: Fetch upstream
         run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/msitarzewski/agency-agents.git
+          git fetch --no-tags upstream main
+
+      - name: Import or update upstream files
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          STATE=".github/upstream-sync.sha"
+          LATEST=$(git rev-parse upstream/main)
+          PATCH="$RUNNER_TEMP/upstream.patch"
 
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://github.com/msitarzewski/agency-agents.git || true
+          # Upstream workflows are intentionally excluded: the built-in token
+          # cannot update workflow files. Keep this repository's sync workflow.
+          if [[ -f "$STATE" ]]; then
+            PREVIOUS=$(cat "$STATE")
+            if [[ ! "$PREVIOUS" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Invalid upstream sync state."
+              exit 1
+            fi
+            git cat-file -e "$PREVIOUS^{commit}"
+            if [[ "$PREVIOUS" == "$LATEST" ]]; then
+              echo "Already up to date with upstream $LATEST."
+              exit 0
+            fi
+            git diff --binary --full-index "$PREVIOUS" "$LATEST" -- . \
+              ':(exclude).github/workflows/**' \
+              ':(exclude).github/upstream-sync.sha' > "$PATCH"
+            if [[ -s "$PATCH" ]]; then
+              if ! git apply --3way --index "$PATCH"; then
+                echo "::error::Upstream changes conflict with local changes. Nothing was pushed; resolve the conflict before retrying."
+                exit 1
+              fi
+            fi
+          else
+            # Bootstrap only from the exact original placeholder repository.
+            # Any unexpected user file stops the import instead of overwriting it.
+            EXPECTED="5b4f8a90c47b15498b7cf11274908457acf38911"
+            git merge-base --is-ancestor "$EXPECTED" HEAD
+            if ! git diff --quiet "$EXPECTED" HEAD -- . ':(exclude).github/workflows/sync-fork.yml'; then
+              echo "::error::Repository contains custom files. Review them before the first import."
+              exit 1
+            fi
+            BACKUP="backup/pre-upstream-import"
+            if ! git ls-remote --exit-code --heads origin "$BACKUP" > /dev/null 2>&1; then
+              git push origin "HEAD:refs/heads/$BACKUP"
+            fi
+            SNAPSHOT=$(mktemp -d "$RUNNER_TEMP/upstream.XXXXXX")
+            git archive "$LATEST" | tar -x -C "$SNAPSHOT"
+            rsync -a --exclude='/.github/workflows/' \
+              --exclude='/.github/upstream-sync.sha' "$SNAPSHOT/" ./
+            git add --all -- . ':(exclude).github/workflows/**' \
+              ':(exclude).github/upstream-sync.sha'
+          fi
 
-      - name: Sync default branch with upstream
-        run: |
-          BASE_BRANCH=$(git remote show upstream | sed -n 's/.*HEAD branch: //p')
-          echo "Default branch: $BASE_BRANCH"
-          git fetch upstream
-          git checkout "$BASE_BRANCH"
-          git merge --ff-only "upstream/$BASE_BRANCH"
-          git push origin "$BASE_BRANCH"
+          mkdir -p .github
+          printf '%s\n' "$LATEST" > "$STATE"
+          git add -f "$STATE"
+          git diff --cached --check
+          git commit -m "Sync upstream msitarzewski/agency-agents at $LATEST"
+          # A regular push rejects concurrent changes rather than overwriting them.
+          git push origin HEAD:main
+          echo "### Upstream synchronization completed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Imported upstream commit: $LATEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "Upstream workflow files are excluded; local edits use three-way conflict detection." >> "$GITHUB_STEP_SUMMARY"
