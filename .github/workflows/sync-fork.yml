@@ -82,14 +82,13 @@ jobs:
             git archive "$LATEST" | tar -x -C "$SNAPSHOT"
             rsync -a --exclude='/.github/workflows/' \
               --exclude='/.github/upstream-sync.sha' "$SNAPSHOT/" ./
-            git add --all -- . ':(exclude).github/workflows/**' \
+            git add -f --all -- . ':(exclude).github/workflows/**' \
               ':(exclude).github/upstream-sync.sha'
           fi
 
           mkdir -p .github
           printf '%s\n' "$LATEST" > "$STATE"
           git add -f "$STATE"
-          git diff --cached --check
           git commit -m "Sync upstream msitarzewski/agency-agents at $LATEST"
           # A regular push rejects concurrent changes rather than overwriting them.
           git push origin HEAD:main
